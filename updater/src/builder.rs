@@ -1,5 +1,6 @@
 use crate::{
     config::{RuntimeConfig, RuntimePaths},
+    install::PackageKind,
     state::{ArtifactPaths, PersistedState, UpdateStatus},
 };
 use anyhow::{Context, Result};
@@ -30,7 +31,7 @@ pub async fn build_update(
     let app_dir = workspace_dir.join("codex-app");
     let logs_dir = workspace_dir.join("logs");
     let install_log = logs_dir.join("install.log");
-    let build_log = logs_dir.join("build-deb.log");
+    let build_log = logs_dir.join("build-package.log");
 
     if workspace_dir.exists() {
         fs::remove_dir_all(&workspace_dir)
@@ -61,10 +62,12 @@ pub async fn build_update(
     .await
     .context("install.sh failed during local rebuild")?;
 
-    state.status = UpdateStatus::BuildingDeb;
+    state.status = UpdateStatus::BuildingPackage;
     state.save(&paths.state_file)?;
+
+    let build_script = package_build_script(&bundle_dir);
     run_and_log(
-        Command::new(bundle_dir.join("scripts/build-deb.sh"))
+        Command::new(&build_script)
             .env("PACKAGE_VERSION", candidate_version)
             .env("APP_DIR_OVERRIDE", &app_dir)
             .env("DIST_DIR_OVERRIDE", &dist_dir)
@@ -78,22 +81,30 @@ pub async fn build_update(
         &build_log,
     )
     .await
-    .context("build-deb.sh failed during local rebuild")?;
+    .with_context(|| format!("{} failed during local rebuild", build_script.display()))?;
 
-    let deb_path = find_deb_in(&dist_dir)?;
+    let package_path = find_package_in(&dist_dir)?;
     state.status = UpdateStatus::ReadyToInstall;
     state.artifact_paths = ArtifactPaths {
         dmg_path: Some(dmg_path.to_path_buf()),
         workspace_dir: Some(workspace_dir.clone()),
-        deb_path: Some(deb_path.clone()),
+        package_path: Some(package_path.clone()),
     };
     state.save(&paths.state_file)?;
-    info!(candidate_version, deb = %deb_path.display(), "local update build ready");
+    info!(candidate_version, package = %package_path.display(), "local update build ready");
 
     Ok(BuildArtifacts {
         workspace_dir,
-        deb_path,
+        deb_path: package_path,
     })
+}
+
+/// Returns the path to the native-package build script appropriate for the running system.
+fn package_build_script(bundle_dir: &Path) -> PathBuf {
+    match PackageKind::detect() {
+        PackageKind::Rpm => bundle_dir.join("scripts/build-rpm.sh"),
+        PackageKind::Deb => bundle_dir.join("scripts/build-deb.sh"),
+    }
 }
 
 fn copy_builder_bundle(source_root: &Path, destination_root: &Path) -> Result<()> {
@@ -102,6 +113,15 @@ fn copy_builder_bundle(source_root: &Path, destination_root: &Path) -> Result<()
         &source_root.join("scripts/build-deb.sh"),
         &destination_root.join("scripts/build-deb.sh"),
     )?;
+    // RPM build script is optional; present when the bundle was built on (or
+    // prepared for) a Fedora/RPM-based system.
+    let rpm_script_src = source_root.join("scripts/build-rpm.sh");
+    if rpm_script_src.exists() {
+        copy_path(
+            &rpm_script_src,
+            &destination_root.join("scripts/build-rpm.sh"),
+        )?;
+    }
     copy_dir_recursive(
         &source_root.join("packaging/linux"),
         &destination_root.join("packaging/linux"),
@@ -149,18 +169,21 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn find_deb_in(dist_dir: &Path) -> Result<PathBuf> {
+/// Find a native package file (.deb or .rpm) inside `dist_dir`.
+fn find_package_in(dist_dir: &Path) -> Result<PathBuf> {
     for entry in fs::read_dir(dist_dir)
         .with_context(|| format!("Failed to read {}", dist_dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("deb") {
-            return Ok(path);
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if ext == "deb" || ext == "rpm" {
+                return Ok(path);
+            }
         }
     }
 
-    anyhow::bail!("No .deb package found in {}", dist_dir.display())
+    anyhow::bail!("No .deb or .rpm package found in {}", dist_dir.display())
 }
 
 fn build_command_path() -> OsString {
@@ -248,6 +271,30 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
+    fn write_fake_build_script(path: &Path, deb_output: bool) -> Result<()> {
+        let script_body = if deb_output {
+            r#"#!/bin/bash
+set -euo pipefail
+mkdir -p "${DIST_DIR_OVERRIDE}"
+touch "${DIST_DIR_OVERRIDE}/codex-desktop_${PACKAGE_VERSION}_amd64.deb"
+"#
+        } else {
+            r#"#!/bin/bash
+set -euo pipefail
+mkdir -p "${DIST_DIR_OVERRIDE}"
+touch "${DIST_DIR_OVERRIDE}/codex-desktop-${PACKAGE_VERSION}.x86_64.rpm"
+"#
+        };
+
+        fs::write(path, script_body)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn builds_update_with_fake_bundle() -> Result<()> {
         let temp = tempdir()?;
@@ -259,6 +306,10 @@ mod tests {
         fs::create_dir_all(bundle_root.join("assets"))?;
         fs::write(bundle_root.join("assets/codex.png"), b"png")?;
         fs::write(bundle_root.join("packaging/linux/control"), "Package: codex")?;
+        fs::write(
+            bundle_root.join("packaging/linux/codex-desktop.spec"),
+            "Name: codex",
+        )?;
         fs::write(
             bundle_root.join("packaging/linux/codex-desktop.desktop"),
             "[Desktop Entry]",
@@ -276,21 +327,6 @@ echo launcher > "${CODEX_INSTALL_DIR}/start.sh"
 chmod +x "${CODEX_INSTALL_DIR}/start.sh"
 "#,
         )?;
-        fs::write(
-            bundle_root.join("scripts/build-deb.sh"),
-            r#"#!/bin/bash
-set -euo pipefail
-mkdir -p "${DIST_DIR_OVERRIDE}"
-touch "${DIST_DIR_OVERRIDE}/codex-desktop_${PACKAGE_VERSION}_amd64.deb"
-"#,
-        )?;
-        let install_meta = fs::metadata(bundle_root.join("install.sh"))?;
-        fs::set_permissions(bundle_root.join("install.sh"), install_meta.permissions())?;
-        let build_meta = fs::metadata(bundle_root.join("scripts/build-deb.sh"))?;
-        fs::set_permissions(
-            bundle_root.join("scripts/build-deb.sh"),
-            build_meta.permissions(),
-        )?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -298,11 +334,11 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop_${PACKAGE_VERSION}_amd64.deb"
                 bundle_root.join("install.sh"),
                 fs::Permissions::from_mode(0o755),
             )?;
-            fs::set_permissions(
-                bundle_root.join("scripts/build-deb.sh"),
-                fs::Permissions::from_mode(0o755),
-            )?;
         }
+
+        // Provide both build scripts so the test works on both Debian and Fedora.
+        write_fake_build_script(&bundle_root.join("scripts/build-deb.sh"), true)?;
+        write_fake_build_script(&bundle_root.join("scripts/build-rpm.sh"), false)?;
 
         let paths = RuntimePaths {
             config_file: temp.path().join("config/config.toml"),
@@ -333,9 +369,15 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop_${PACKAGE_VERSION}_amd64.deb"
         assert_eq!(state.status, UpdateStatus::ReadyToInstall);
         assert!(artifacts.workspace_dir.exists());
         assert!(artifacts.deb_path.exists());
-        assert_eq!(
-            artifacts.deb_path.file_name().and_then(|value| value.to_str()),
-            Some("codex-desktop_2026.03.24+abcd1234_amd64.deb")
+        // The file should be either a .deb or .rpm depending on the host distro.
+        let ext = artifacts
+            .deb_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        assert!(
+            ext == "deb" || ext == "rpm",
+            "expected .deb or .rpm, got .{ext}"
         );
         Ok(())
     }

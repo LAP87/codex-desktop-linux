@@ -12,7 +12,11 @@ pub enum UpdateStatus {
     DownloadingDmg,
     PreparingWorkspace,
     PatchingApp,
-    BuildingDeb,
+    /// Building a native Linux package (.deb or .rpm). Serialised as
+    /// `"building_package"` in new state files; the legacy key
+    /// `"building_deb"` is accepted on read for backward compatibility.
+    #[serde(alias = "building_deb")]
+    BuildingPackage,
     ReadyToInstall,
     WaitingForAppExit,
     Installing,
@@ -24,7 +28,11 @@ pub enum UpdateStatus {
 pub struct ArtifactPaths {
     pub dmg_path: Option<PathBuf>,
     pub workspace_dir: Option<PathBuf>,
-    pub deb_path: Option<PathBuf>,
+    /// Path to the built native package (.deb or .rpm). Stored as
+    /// `"deb_path"` in JSON for backward compatibility with existing state
+    /// files.
+    #[serde(rename = "deb_path")]
+    pub package_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,5 +127,36 @@ mod tests {
         assert!(loaded.notified_events.contains("ready_to_install"));
         assert!(!loaded.auto_install_on_app_exit);
         Ok(())
+    }
+
+    #[test]
+    fn deserialises_legacy_building_deb_status() {
+        let json = r#""building_deb""#;
+        let status: UpdateStatus = serde_json::from_str(json).expect("should parse building_deb");
+        assert_eq!(status, UpdateStatus::BuildingPackage);
+    }
+
+    #[test]
+    fn deserialises_legacy_deb_path_field() {
+        let json = r#"{"dmg_path":null,"workspace_dir":null,"deb_path":"/tmp/codex.deb"}"#;
+        let paths: ArtifactPaths = serde_json::from_str(json).expect("should parse deb_path field");
+        assert_eq!(
+            paths.package_path.as_deref().and_then(|p| p.to_str()),
+            Some("/tmp/codex.deb")
+        );
+    }
+
+    #[test]
+    fn serialises_package_path_as_deb_path() {
+        let paths = ArtifactPaths {
+            dmg_path: None,
+            workspace_dir: None,
+            package_path: Some(std::path::PathBuf::from("/tmp/codex.rpm")),
+        };
+        let json = serde_json::to_string(&paths).expect("should serialise");
+        assert!(
+            json.contains("\"deb_path\""),
+            "JSON key must remain deb_path for backward compat"
+        );
     }
 }

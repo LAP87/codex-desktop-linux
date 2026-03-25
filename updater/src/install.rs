@@ -7,9 +7,62 @@ use std::{
 const PACKAGE_NAME: &str = "codex-desktop";
 const INSTALLED_UPDATER_BINARY: &str = "/usr/bin/codex-update-manager";
 
+/// The native package format in use on the current system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageKind {
+    Deb,
+    Rpm,
+}
+
+impl PackageKind {
+    /// Detect the package manager available on the running system.
+    /// Falls back to [`PackageKind::Deb`] when neither `dpkg` nor `rpm` is found.
+    pub fn detect() -> Self {
+        if command_exists("dpkg") {
+            Self::Deb
+        } else if command_exists("rpm") {
+            Self::Rpm
+        } else {
+            Self::Deb
+        }
+    }
+
+    /// Infer the package kind from a file path extension.
+    pub fn from_path(path: &Path) -> Self {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("rpm") => Self::Rpm,
+            _ => Self::Deb,
+        }
+    }
+}
+
 pub fn installed_package_version() -> String {
+    match PackageKind::detect() {
+        PackageKind::Deb => installed_deb_version(),
+        PackageKind::Rpm => installed_rpm_version(),
+    }
+}
+
+fn installed_deb_version() -> String {
     match Command::new("dpkg-query")
         .args(["-W", "-f=${Version}", PACKAGE_NAME])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if version.is_empty() {
+                "unknown".to_string()
+            } else {
+                version
+            }
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+fn installed_rpm_version() -> String {
+    match Command::new("rpm")
+        .args(["-q", "--queryformat", "%{VERSION}-%{RELEASE}", PACKAGE_NAME])
         .output()
     {
         Ok(output) if output.status.success() => {
@@ -38,14 +91,31 @@ pub fn install_deb(path: &Path) -> Result<()> {
     run_install(&mut command).context("dpkg -i failed")
 }
 
-pub fn pkexec_command(current_exe: &Path, deb_path: &Path) -> Command {
+pub fn install_rpm(path: &Path) -> Result<()> {
+    anyhow::ensure!(path.exists(), "RPM package not found: {}", path.display());
+
+    if command_exists("dnf") {
+        let mut command = dnf_install_command(path)?;
+        run_install(&mut command).context("dnf install failed")?;
+        return Ok(());
+    }
+
+    let mut command = rpm_install_command(path);
+    run_install(&mut command).context("rpm -Uvh failed")
+}
+
+pub fn pkexec_command(current_exe: &Path, package_path: &Path) -> Command {
     let updater_binary = updater_binary_for_privileged_install(current_exe);
+    let subcommand = match PackageKind::from_path(package_path) {
+        PackageKind::Rpm => "install-rpm",
+        PackageKind::Deb => "install-deb",
+    };
     let mut command = Command::new("pkexec");
     command
         .arg(updater_binary)
-        .arg("install-deb")
+        .arg(subcommand)
         .arg("--path")
-        .arg(deb_path);
+        .arg(package_path);
     command
 }
 
@@ -93,6 +163,31 @@ fn apt_install_command(path: &Path) -> Result<Command> {
 fn dpkg_install_command(path: &Path) -> Command {
     let mut command = Command::new("dpkg");
     command.arg("-i").arg(path.as_os_str());
+    command
+}
+
+fn dnf_install_command(path: &Path) -> Result<Command> {
+    let parent = path
+        .parent()
+        .context("RPM package path has no parent directory")?;
+    let file_name = path
+        .file_name()
+        .context("RPM package path has no file name")?
+        .to_string_lossy()
+        .into_owned();
+
+    let mut command = Command::new("dnf");
+    command
+        .current_dir(parent)
+        .arg("install")
+        .arg("-y")
+        .arg(format!("./{file_name}"));
+    Ok(command)
+}
+
+fn rpm_install_command(path: &Path) -> Command {
+    let mut command = Command::new("rpm");
+    command.args(["-Uvh"]).arg(path.as_os_str());
     command
 }
 
@@ -155,7 +250,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_pkexec_command_for_privileged_install() {
+    fn builds_pkexec_command_for_privileged_deb_install() {
         let command = pkexec_command(
             Path::new("/usr/bin/codex-update-manager"),
             Path::new("/tmp/update.deb"),
@@ -171,6 +266,27 @@ mod tests {
                 "install-deb",
                 "--path",
                 "/tmp/update.deb"
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_pkexec_command_for_privileged_rpm_install() {
+        let command = pkexec_command(
+            Path::new("/usr/bin/codex-update-manager"),
+            Path::new("/tmp/update.rpm"),
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "/usr/bin/codex-update-manager",
+                "install-rpm",
+                "--path",
+                "/tmp/update.rpm"
             ]
         );
     }
@@ -197,6 +313,36 @@ mod tests {
     }
 
     #[test]
+    fn builds_local_dnf_install_command() -> Result<()> {
+        let command = dnf_install_command(Path::new("/tmp/build/codex.rpm"))?;
+        assert_eq!(command.get_program().to_string_lossy(), "dnf");
+        assert_eq!(
+            command
+                .get_args()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["install", "-y", "./codex.rpm"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn package_kind_from_path_detects_rpm() {
+        assert_eq!(
+            PackageKind::from_path(Path::new("/tmp/codex.rpm")),
+            PackageKind::Rpm
+        );
+    }
+
+    #[test]
+    fn package_kind_from_path_detects_deb() {
+        assert_eq!(
+            PackageKind::from_path(Path::new("/tmp/codex.deb")),
+            PackageKind::Deb
+        );
+    }
+
+    #[test]
     fn compares_debian_versions_using_dpkg_rules() -> Result<()> {
         assert!(is_version_newer(
             "2026.03.24.220000+88f07cd3",
@@ -209,3 +355,4 @@ mod tests {
         Ok(())
     }
 }
+
