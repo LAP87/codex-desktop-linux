@@ -5,6 +5,7 @@ use std::{
 };
 
 const PACKAGE_NAME: &str = "codex-desktop";
+const INSTALLED_UPDATER_BINARY: &str = "/usr/bin/codex-update-manager";
 
 pub fn installed_package_version() -> String {
     match Command::new("dpkg-query")
@@ -38,9 +39,10 @@ pub fn install_deb(path: &Path) -> Result<()> {
 }
 
 pub fn pkexec_command(current_exe: &Path, deb_path: &Path) -> Command {
+    let updater_binary = updater_binary_for_privileged_install(current_exe);
     let mut command = Command::new("pkexec");
     command
-        .arg(current_exe)
+        .arg(updater_binary)
         .arg("install-deb")
         .arg("--path")
         .arg(deb_path);
@@ -92,6 +94,15 @@ fn dpkg_install_command(path: &Path) -> Command {
     let mut command = Command::new("dpkg");
     command.arg("-i").arg(path.as_os_str());
     command
+}
+
+fn updater_binary_for_privileged_install(current_exe: &Path) -> PathBuf {
+    let installed = PathBuf::from(INSTALLED_UPDATER_BINARY);
+    if installed.is_file() {
+        installed
+    } else {
+        current_exe.to_path_buf()
+    }
 }
 
 fn deb_package_version(path: &Path) -> Result<String> {
@@ -162,6 +173,13 @@ mod tests {
                 "/tmp/update.deb"
             ]
         );
+    }
+
+    #[test]
+    fn prefers_installed_updater_path_for_pkexec() {
+        let selected =
+            updater_binary_for_privileged_install(Path::new("/tmp/codex-update-manager-old"));
+        assert_eq!(selected, PathBuf::from("/usr/bin/codex-update-manager"));
     }
 
     #[test]
