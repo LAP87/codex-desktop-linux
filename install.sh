@@ -35,10 +35,15 @@ check_deps() {
     done
     if [ ${#missing[@]} -ne 0 ]; then
         error "Missing dependencies: ${missing[*]}
-Install them first:
-  sudo apt install nodejs npm python3 p7zip-full curl unzip build-essential  # Debian/Ubuntu
-  sudo dnf install nodejs npm python3 p7zip curl unzip && sudo dnf groupinstall 'Development Tools'  # Fedora
-  sudo pacman -S nodejs npm python p7zip curl unzip base-devel  # Arch"
+Run the helper to install them automatically:
+  bash scripts/install-deps.sh
+
+Or install manually:
+  sudo apt install nodejs npm python3 p7zip-full curl unzip build-essential         # Debian/Ubuntu
+  sudo dnf install nodejs npm python3 7zip curl unzip @development-tools            # Fedora 41+ (dnf5)
+  sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
+    && sudo dnf groupinstall 'Development Tools'
+  sudo pacman -S nodejs npm python p7zip curl unzip base-devel                      # Arch"
     fi
 
     NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d v)
@@ -48,9 +53,11 @@ Install them first:
 
     if ! command -v make &>/dev/null || ! command -v g++ &>/dev/null; then
         error "Build tools (make, g++) required:
-  sudo apt install build-essential   # Debian/Ubuntu
-  sudo dnf groupinstall 'Development Tools'  # Fedora
-  sudo pacman -S base-devel          # Arch"
+  bash scripts/install-deps.sh                                          # auto-detect
+  sudo apt install build-essential                                       # Debian/Ubuntu
+  sudo dnf install @development-tools                                    # Fedora 41+ (dnf5)
+  sudo dnf groupinstall 'Development Tools'                              # Fedora <41 (dnf)
+  sudo pacman -S base-devel                                              # Arch"
     fi
 
     info "All dependencies found"
@@ -363,7 +370,7 @@ echo "Using CODEX_CLI_PATH=$CODEX_CLI_PATH"
 
 cd "$SCRIPT_DIR"
 echo "$$" > "$APP_PID_FILE"
-exec "$SCRIPT_DIR/electron" --no-sandbox --class=codex-desktop "$@"
+exec "$SCRIPT_DIR/electron" --no-sandbox --class=codex-desktop --app-id=codex-desktop "$@"
 SCRIPT
 
     chmod +x "$INSTALL_DIR/start.sh"

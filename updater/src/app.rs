@@ -30,7 +30,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Daemon => run_daemon(&config, &mut state, &paths).await,
         Commands::CheckNow => run_check_now(&config, &mut state, &paths).await,
         Commands::Status { json } => run_status(state, json),
-        Commands::InstallDeb { path } => run_install_deb(path).await,
+        Commands::InstallDeb { path } => install::install_deb(&path),
+        Commands::InstallRpm { path } => install::install_rpm(&path),
     }
 }
 
@@ -102,10 +103,6 @@ fn run_status(state: PersistedState, json: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn run_install_deb(path: std::path::PathBuf) -> Result<()> {
-    install::install_deb(&path)
 }
 
 async fn run_check_cycle(
@@ -218,7 +215,7 @@ async fn reconcile_pending_install(
         && state.candidate_version.is_some()
         && state
             .artifact_paths
-            .deb_path
+            .package_path
             .as_ref()
             .is_some_and(|path| path.exists())
     {
@@ -229,12 +226,12 @@ async fn reconcile_pending_install(
 
     match state.status {
         UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit => {
-            let Some(deb_path) = state.artifact_paths.deb_path.clone() else {
+            let Some(package_path) = state.artifact_paths.package_path.clone() else {
                 return Ok(());
             };
 
-            if !deb_path.exists() {
-                state.mark_failed(format!("Pending .deb artifact is missing: {}", deb_path.display()));
+            if !package_path.exists() {
+                state.mark_failed(format!("Pending package artifact is missing: {}", package_path.display()));
                 state.save(&paths.state_file)?;
                 return Ok(());
             }
@@ -259,7 +256,7 @@ async fn reconcile_pending_install(
                 return Ok(());
             }
 
-            trigger_install(state, paths, &deb_path).await?;
+            trigger_install(state, paths, &package_path).await?;
         }
         _ => {}
     }
@@ -297,7 +294,7 @@ fn maybe_notify(
 async fn trigger_install(
     state: &mut PersistedState,
     paths: &RuntimePaths,
-    deb_path: &Path,
+    package_path: &Path,
 ) -> Result<()> {
     state.status = UpdateStatus::Installing;
     state.error_message = None;
@@ -305,11 +302,11 @@ async fn trigger_install(
 
     let _ = notify::send(
         "Installing Codex Desktop update",
-        "Applying the locally rebuilt Debian package.",
+        "Applying the locally rebuilt Linux package.",
     );
 
     let current_exe = std::env::current_exe().context("Failed to resolve updater binary path")?;
-    let status = install::pkexec_command(&current_exe, deb_path)
+    let status = install::pkexec_command(&current_exe, package_path)
         .status()
         .context("Failed to launch pkexec for update installation")?;
 
@@ -371,9 +368,9 @@ mod tests {
         };
         paths.ensure_dirs()?;
 
-        let deb_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(deb_path.parent().expect("deb path should have parent"))?;
-        std::fs::write(&deb_path, b"deb")?;
+        let package_path = temp.path().join("dist/codex.deb");
+        std::fs::create_dir_all(package_path.parent().expect("package path should have parent"))?;
+        std::fs::write(&package_path, b"deb")?;
 
         let config = RuntimeConfig {
             dmg_url: "https://example.com/Codex.dmg".to_string(),
@@ -390,7 +387,7 @@ mod tests {
         state.status = UpdateStatus::Failed;
         state.candidate_version = Some("2026.03.25.010203+deadbeef".to_string());
         state.error_message = Some("previous failure".to_string());
-        state.artifact_paths.deb_path = Some(deb_path);
+        state.artifact_paths.package_path = Some(package_path);
 
         reconcile_pending_install(&config, &mut state, &paths).await?;
 

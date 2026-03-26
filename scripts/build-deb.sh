@@ -37,7 +37,10 @@ ensure_updater_binary() {
     fi
 
     [ -f "$REPO_DIR/Cargo.toml" ] || error "Missing updater binary: $UPDATER_BINARY_SOURCE"
-    command -v cargo >/dev/null 2>&1 || error "cargo is required to build codex-update-manager"
+    command -v cargo >/dev/null 2>&1 || error "cargo is required to build codex-update-manager.
+Install the Rust toolchain:
+  bash scripts/install-deps.sh        # auto-installs via rustup
+  # or manually: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
 
     info "Building codex-update-manager release binary"
     cargo build --release -p codex-update-manager >&2
@@ -81,7 +84,9 @@ main() {
     mkdir -p "$UPDATE_BUILDER_ROOT/scripts" "$UPDATE_BUILDER_ROOT/packaging/linux" "$UPDATE_BUILDER_ROOT/assets"
     cp "$REPO_DIR/install.sh" "$UPDATE_BUILDER_ROOT/install.sh"
     cp "$REPO_DIR/scripts/build-deb.sh" "$UPDATE_BUILDER_ROOT/scripts/build-deb.sh"
+    cp "$REPO_DIR/scripts/build-rpm.sh" "$UPDATE_BUILDER_ROOT/scripts/build-rpm.sh"
     cp "$REPO_DIR/packaging/linux/control" "$UPDATE_BUILDER_ROOT/packaging/linux/control"
+    cp "$REPO_DIR/packaging/linux/codex-desktop.spec" "$UPDATE_BUILDER_ROOT/packaging/linux/codex-desktop.spec"
     cp "$REPO_DIR/packaging/linux/codex-desktop.desktop" "$UPDATE_BUILDER_ROOT/packaging/linux/codex-desktop.desktop"
     cp "$UPDATER_SERVICE_SOURCE" "$UPDATE_BUILDER_ROOT/packaging/linux/codex-update-manager.service"
     cp "$REPO_DIR/assets/codex.png" "$UPDATE_BUILDER_ROOT/assets/codex.png"

@@ -17,7 +17,13 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Install a Debian package (.deb) with elevated privileges.
     InstallDeb {
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Install an RPM package (.rpm) with elevated privileges.
+    InstallRpm {
         #[arg(long)]
         path: PathBuf,
     },

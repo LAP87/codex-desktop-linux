@@ -17,25 +17,49 @@ The installer:
 
 ## Prerequisites
 
-**Node.js 20+**, **npm**, **Python 3**, **7z**, **curl**, and **build tools** (gcc/g++/make).
+**Node.js 20+**, **npm**, **Python 3**, **7z**, **curl**, **build tools** (gcc/g++/make), and **Rust** (cargo — needed to compile the update manager).
+
+Run the helper script to install everything automatically (detects apt / dnf5 / dnf / pacman and installs Rust via rustup):
+
+```bash
+bash scripts/install-deps.sh
+```
+
+Or install manually for your distro:
 
 ### Debian/Ubuntu
 
 ```bash
-sudo apt install nodejs npm python3 p7zip-full curl build-essential
+sudo apt install nodejs npm python3 p7zip-full curl unzip build-essential
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### Fedora
+### Fedora 41+ (dnf5)
 
 ```bash
-sudo dnf install nodejs npm python3 p7zip curl
+sudo dnf install nodejs npm python3 7zip curl unzip @development-tools
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+### Fedora &lt;41 (dnf)
+
+```bash
+sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip
 sudo dnf groupinstall 'Development Tools'
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 ### Arch
 
 ```bash
-sudo pacman -S nodejs npm python p7zip curl base-devel
+sudo pacman -S nodejs npm python p7zip curl unzip base-devel
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+After installing Rust, apply the PATH change to your current shell:
+
+```bash
+source "$HOME/.cargo/env"
 ```
 
 You also need the **Codex CLI**:
