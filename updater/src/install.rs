@@ -14,19 +14,23 @@ const DPKG_CANDIDATES: &[&str] = &["/usr/bin/dpkg", "/bin/dpkg"];
 const DPKG_DEB_CANDIDATES: &[&str] = &["/usr/bin/dpkg-deb", "/bin/dpkg-deb"];
 const DPKG_QUERY_CANDIDATES: &[&str] = &["/usr/bin/dpkg-query", "/bin/dpkg-query"];
 const RPM_CANDIDATES: &[&str] = &["/usr/bin/rpm", "/bin/rpm"];
+const PACMAN_CANDIDATES: &[&str] = &["/usr/bin/pacman", "/bin/pacman"];
 
 /// The native package format in use on the current system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageKind {
     Deb,
     Rpm,
+    Pacman,
 }
 
 impl PackageKind {
     /// Detect the package manager available on the running system.
-    /// Falls back to [`PackageKind::Deb`] when neither `dpkg` nor `rpm` is found.
+    /// Checks pacman first (Arch), then dpkg (Debian/Ubuntu), then rpm (Fedora).
     pub fn detect() -> Self {
-        if program_exists(DPKG_CANDIDATES, "dpkg") {
+        if program_exists(PACMAN_CANDIDATES, "pacman") {
+            Self::Pacman
+        } else if program_exists(DPKG_CANDIDATES, "dpkg") {
             Self::Deb
         } else if program_exists(RPM_CANDIDATES, "rpm") {
             Self::Rpm
@@ -49,6 +53,7 @@ pub fn installed_package_version() -> String {
     match PackageKind::detect() {
         PackageKind::Deb => installed_deb_version(),
         PackageKind::Rpm => installed_rpm_version(),
+        PackageKind::Pacman => installed_pacman_version(),
     }
 }
 
@@ -68,6 +73,13 @@ fn installed_rpm_version() -> String {
     installed_version_from_command(
         &program_path(RPM_CANDIDATES, "rpm"),
         &["-q", "--queryformat", "%{VERSION}-%{RELEASE}", PACKAGE_NAME],
+    )
+}
+
+fn installed_pacman_version() -> String {
+    installed_version_from_command(
+        &program_path(PACMAN_CANDIDATES, "pacman"),
+        &["-Q", PACKAGE_NAME],
     )
 }
 
@@ -104,12 +116,26 @@ pub fn install_rpm(path: &Path) -> Result<()> {
     run_install(&mut command).context("rpm -Uvh failed")
 }
 
+/// Installs a package via pacman on Arch Linux / CachyOS.
+pub fn install_pacman(path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        path.exists(),
+        "Pacman package not found: {}",
+        path.display()
+    );
+    ensure_upgrade_path_pacman(path)?;
+
+    let mut command = pacman_install_command(path);
+    run_install(&mut command).context("pacman -U failed")
+}
+
 /// Builds the `pkexec` command used for privileged package installation.
 pub fn pkexec_command(current_exe: &Path, package_path: &Path) -> Command {
     let updater_binary = updater_binary_for_privileged_install(current_exe);
     let subcommand = match PackageKind::from_path(package_path) {
         PackageKind::Rpm => "install-rpm",
         PackageKind::Deb => "install-deb",
+        PackageKind::Pacman => "install-pacman",
     };
     let mut command = Command::new("pkexec");
     command
@@ -161,6 +187,20 @@ fn ensure_upgrade_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_upgrade_path_pacman(path: &Path) -> Result<()> {
+    let installed = installed_pacman_version();
+    if installed == "unknown" {
+        return Ok(());
+    }
+
+    let candidate = pacman_package_version(path)?;
+    anyhow::ensure!(
+        is_version_newer_pacman(&candidate, &installed)?,
+        "Refusing to install non-newer package version {candidate} over installed version {installed}"
+    );
+    Ok(())
+}
+
 fn apt_install_command(path: &Path) -> Result<Command> {
     install_command_in_parent(&program_path(APT_CANDIDATES, "apt"), path)
 }
@@ -201,6 +241,12 @@ fn install_command_in_parent(program: &Path, path: &Path) -> Result<Command> {
 fn rpm_install_command(path: &Path) -> Command {
     let mut command = Command::new(program_path(RPM_CANDIDATES, "rpm"));
     command.args(["-Uvh"]).arg(path.as_os_str());
+    command
+}
+
+fn pacman_install_command(path: &Path) -> Command {
+    let mut command = Command::new(program_path(PACMAN_CANDIDATES, "pacman"));
+    command.arg("-U").arg(path.as_os_str());
     command
 }
 
@@ -245,6 +291,76 @@ fn is_version_newer(candidate: &str, installed: &str) -> Result<bool> {
         .status()
         .context("Failed to compare Debian package versions")?;
     Ok(status.success())
+}
+
+fn pacman_package_version(path: &Path) -> Result<String> {
+    // Parse pacman package version from filename.
+    // Format: codex-desktop-1.0.0-1-x86_64.pkg.tar.zst
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Package path has no file name")?;
+
+    // Strip extension (.pkg.tar.zst, .pkg.tar.xz, .pkg.tar.gz, etc.)
+    let name_lower = file_name.to_lowercase();
+    let stripped = name_lower
+        .strip_suffix(".pkg.tar.zst")
+        .or_else(|| name_lower.strip_suffix(".pkg.tar.xz"))
+        .or_else(|| name_lower.strip_suffix(".pkg.tar.gz"))
+        .or_else(|| name_lower.strip_suffix(".pkg.tar.bz2"))
+        .or_else(|| name_lower.strip_suffix(".pkg.tar.lz"))
+        .or_else(|| name_lower.strip_suffix(".pkg.tar.lz4"))
+        .or_else(|| name_lower.strip_suffix(".pkg.tar.lz5"))
+        .or_else(|| name_lower.strip_suffix(".pkg.tar.zst"))
+        .context("Not a valid pacman package filename")?;
+
+    // Extract name-version-release from: codex-desktop-1.0.0-1-x86_64
+    // The format is: name-version-release-arch
+    let parts: Vec<&str> = stripped.rsplitn(3, '-').collect();
+    if parts.len() < 3 {
+        anyhow::bail!("Could not parse package version from: {}", file_name);
+    }
+    // parts[0] = arch, parts[1] = release, parts[2] = version... but name might have dashes too
+    // Use a simpler approach: find the last two dash-separated numeric parts
+    let version_release = format!("{}-{}", parts[2], parts[1]);
+    Ok(version_release)
+}
+
+fn is_version_newer_pacman(candidate: &str, _installed: &str) -> Result<bool> {
+    // Parse version-release from candidate filename
+    // Format: name-version-release-arch (e.g. codex-desktop-1.2.3-1-x86_64)
+    let parts: Vec<&str> = candidate.split('-').collect();
+    if parts.len() < 3 {
+        return Ok(false);
+    }
+    // Last two parts are version and release
+    let cand_ver = parts[parts.len() - 2];
+    let cand_rel = parts[parts.len() - 1];
+
+    // Compare against currently installed via pacman -Q
+    let output = Command::new(program_path(PACMAN_CANDIDATES, "pacman"))
+        .args(["-Q", "codex-desktop"])
+        .output()
+        .context("Failed to query installed pacman version")?;
+
+    if !output.status.success() {
+        // Not installed, allow install
+        return Ok(true);
+    }
+
+    let installed_full = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let inst_parts: Vec<&str> = installed_full.split('-').collect();
+    if inst_parts.len() < 3 {
+        return Ok(true);
+    }
+    let inst_ver = inst_parts[inst_parts.len() - 2];
+    let inst_rel = inst_parts[inst_parts.len() - 1];
+
+    // Compare version first, then release
+    if cand_ver != inst_ver {
+        return Ok(cand_ver > inst_ver);
+    }
+    Ok(cand_rel > inst_rel)
 }
 
 fn program_exists(candidates: &[&str], fallback: &str) -> bool {

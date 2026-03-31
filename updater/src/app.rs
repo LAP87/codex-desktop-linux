@@ -35,6 +35,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Status { json } => run_status(state, json),
         Commands::InstallDeb { path } => install::install_deb(&path),
         Commands::InstallRpm { path } => install::install_rpm(&path),
+        Commands::InstallPacman { path } => install::install_pacman(&path),
     }
 }
 

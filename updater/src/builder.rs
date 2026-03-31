@@ -143,6 +143,7 @@ fn package_build_script(bundle_dir: &Path) -> PathBuf {
     match PackageKind::detect() {
         PackageKind::Rpm => bundle_dir.join("scripts/build-rpm.sh"),
         PackageKind::Deb => bundle_dir.join("scripts/build-deb.sh"),
+        PackageKind::Pacman => bundle_dir.join("scripts/build-pacman.sh"),
     }
 }
 

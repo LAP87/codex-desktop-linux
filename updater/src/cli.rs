@@ -30,4 +30,9 @@ pub enum Commands {
         #[arg(long)]
         path: PathBuf,
     },
+    /// Install a Pacman package (.pkg.tar.zst) on Arch Linux with elevated privileges.
+    InstallPacman {
+        #[arg(long)]
+        path: PathBuf,
+    },
 }
