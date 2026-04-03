@@ -59,7 +59,7 @@ bash scripts/install-deps.sh
 Or manually:
 
 ```bash
-sudo pacman -S --needed nodejs npm python p7zip curl unzip base-devel
+sudo pacman -S --needed nodejs npm python p7zip curl unzip zstd base-devel
 ```
 
 You also need the **Rust toolchain** for the updater crate:
@@ -200,7 +200,7 @@ make clean-dist
 make clean-state
 ```
 
-`make package` auto-detects the native package manager available on the host and builds the matching package type (Debian, RPM, or pacman).
+`make package` auto-detects the native package manager available on the host and builds the matching package type (Debian, RPM, or pacman). `make install` does the same for the latest built native package.
 
 ## Update Manager
 
@@ -212,6 +212,7 @@ The package installs a companion service named `codex-update-manager`.
 - When a new DMG is detected, it rebuilds a local native package using the bundled `update-builder` files under `/opt/codex-desktop/update-builder`.
 - If the app is open, the update stays pending until the Electron process exits.
 - When the app is closed, the service requests elevation with `pkexec` only for the final install step.
+- On Arch, that final install step is `pacman -U --noconfirm` against the locally rebuilt `.pkg.tar.zst`, not `git pull`.
 - If the privileged install fails or the auth dialog is dismissed, the updater stays in `failed` instead of re-prompting every 15 seconds.
 - Package removal now makes a best-effort attempt to stop and disable the user service for active desktop sessions.
 
@@ -295,6 +296,8 @@ If `makepkg` is available (Arch Linux), also run:
 
 ```bash
 ./scripts/build-pacman.sh
+pacman -Qip dist/codex-desktop-*.pkg.tar.zst
+pacman -Qlp dist/codex-desktop-*.pkg.tar.zst | sed -n '1,40p'
 ```
 
 If launcher behavior changed, inspect:

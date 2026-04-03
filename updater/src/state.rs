@@ -15,7 +15,7 @@ pub enum UpdateStatus {
     DownloadingDmg,
     PreparingWorkspace,
     PatchingApp,
-    /// Building a native Linux package (.deb or .rpm). Serialised as
+    /// Building a native Linux package (.deb, .rpm, or .pkg.tar.*). Serialised as
     /// `"building_package"` in new state files; the legacy key
     /// `"building_deb"` is accepted on read for backward compatibility.
     #[serde(alias = "building_deb")]
@@ -32,7 +32,7 @@ pub enum UpdateStatus {
 pub struct ArtifactPaths {
     pub dmg_path: Option<PathBuf>,
     pub workspace_dir: Option<PathBuf>,
-    /// Path to the built native package (.deb or .rpm). Stored as
+    /// Path to the built native package (.deb, .rpm, or .pkg.tar.*). Stored as
     /// `"deb_path"` in JSON for backward compatibility with existing state
     /// files.
     #[serde(rename = "deb_path")]

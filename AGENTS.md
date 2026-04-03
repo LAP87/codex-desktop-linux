@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository adapts the official macOS Codex Desktop DMG to a runnable Linux build, packages that build as native `.deb` and `.rpm` artifacts, and ships a local Rust update manager that rebuilds future Linux packages from newer upstream DMGs.
+This repository adapts the official macOS Codex Desktop DMG to a runnable Linux build, packages that build as native `.deb`, `.rpm`, and pacman artifacts, and ships a local Rust update manager that rebuilds future Linux packages from newer upstream DMGs.
 
 The current working flow is:
 
@@ -11,7 +11,7 @@ The current working flow is:
 3. rebuilds native Node modules for Linux
 4. downloads a Linux Electron runtime
 5. writes a Linux launcher into `codex-app/start.sh`
-6. `scripts/build-deb.sh` or `scripts/build-rpm.sh` packages `codex-app/`
+6. `scripts/build-deb.sh`, `scripts/build-rpm.sh`, or `scripts/build-pacman.sh` packages `codex-app/`
 7. `codex-update-manager` runs as a `systemd --user` service and manages local auto-updates
 
 ## Source Of Truth
@@ -22,6 +22,8 @@ The current working flow is:
   Builds the `.deb` from the already-generated `codex-app/`.
 - `scripts/build-rpm.sh`
   Builds the `.rpm` from the already-generated `codex-app/`.
+- `scripts/build-pacman.sh`
+  Builds the `.pkg.tar.zst` from the already-generated `codex-app/`.
 - `scripts/install-deps.sh`
   Installs host dependencies and bootstraps Rust.
 - `scripts/lib/package-common.sh`
@@ -56,7 +58,7 @@ The current working flow is:
 - `codex-app/`
   Generated Linux app directory. Treat this as build output unless you are intentionally patching the launcher or testing package contents.
 - `dist/`
-  Generated packaging output, including `dist/codex-desktop_*.deb` and `dist/codex-desktop-*.rpm`.
+  Generated packaging output, including `dist/codex-desktop_*.deb`, `dist/codex-desktop-*.rpm`, and `dist/codex-desktop-*.pkg.tar.zst`.
 - `Codex.dmg`
   Cached upstream DMG. Useful for repeat installs.
 - `~/.config/codex-update-manager/config.toml`
@@ -94,7 +96,7 @@ Do not assume `codex-app/` is pristine. If behavior differs from `install.sh`, p
 - Update manager:
   The native packages include `/usr/bin/codex-update-manager`, `/usr/lib/systemd/user/codex-update-manager.service`, and a minimal rebuild bundle under `/opt/codex-desktop/update-builder`.
 - Privilege boundary:
-  The updater runs unprivileged. It only escalates at install time via `pkexec /usr/bin/codex-update-manager install-deb --path <deb>` or `pkexec /usr/bin/codex-update-manager install-rpm --path <rpm>`.
+  The updater runs unprivileged. It only escalates at install time via `pkexec /usr/bin/codex-update-manager install-deb --path <deb>`, `install-rpm --path <rpm>`, or `install-pacman --path <pkg.tar.zst>`.
 - Failed privileged installs:
   A failed or cancelled `pkexec` install now stays in `Failed` and does not auto-retry every reconcile cycle. Check `service.log`, fix the root cause, and retry by waiting for the next rebuild or rebuilding a newer package.
 - Package removal:
@@ -158,6 +160,24 @@ Optional version override:
 PACKAGE_VERSION=2026.03.24.120000+deadbeef ./scripts/build-rpm.sh
 ```
 
+### Build the pacman package
+
+```bash
+./scripts/build-pacman.sh
+```
+
+Default output:
+
+```bash
+dist/codex-desktop-YYYY.MM.DD.HHMMSS-<release>-x86_64.pkg.tar.zst
+```
+
+Optional version override:
+
+```bash
+PACKAGE_VERSION=2026.03.24.120000+deadbeef ./scripts/build-pacman.sh
+```
+
 ## Runtime Expectations
 
 - `node`, `npm`, `npx`, `python3`, `7z`, `curl`, `unzip`, `make`, and `g++` are required for `install.sh`
@@ -181,6 +201,8 @@ The Debian builder uses `dpkg-deb --root-owner-group` so package ownership is co
 
 The RPM builder stages the same app and updater payload into an RPM buildroot before invoking `rpmbuild`.
 
+The pacman builder stages the same payload into a package root, writes `.PKGINFO`/`.MTREE`, and then produces a `.pkg.tar.zst` archive for `pacman -U`.
+
 ## Preferred Validation After Changes
 
 After editing installer or packaging logic, validate at least:
@@ -189,6 +211,7 @@ After editing installer or packaging logic, validate at least:
 bash -n install.sh
 bash -n scripts/build-deb.sh
 bash -n scripts/build-rpm.sh
+bash -n scripts/build-pacman.sh
 cargo check -p codex-update-manager
 cargo test -p codex-update-manager
 ./scripts/build-deb.sh
@@ -200,6 +223,14 @@ If `rpmbuild` is available, also run:
 
 ```bash
 ./scripts/build-rpm.sh
+```
+
+If `pacman` is available, also run:
+
+```bash
+./scripts/build-pacman.sh
+pacman -Qip dist/codex-desktop-*.pkg.tar.zst
+pacman -Qlp dist/codex-desktop-*.pkg.tar.zst | sed -n '1,40p'
 ```
 
 If launcher behavior changed, also inspect:
@@ -222,5 +253,5 @@ sed -n '1,160p' ~/.local/state/codex-update-manager/service.log
 - Prefer changing `install.sh` over manually patching `codex-app/start.sh`, unless you are making a temporary local test.
 - Keep native-package-only launcher behavior in `packaging/linux/codex-packaged-runtime.sh`; `install.sh` should stay generic and only load that helper optionally.
 - If you update the launcher template inside `install.sh`, regenerate `codex-app/` or keep `codex-app/start.sh` aligned before building a new package.
-- Keep packaging changes in `packaging/linux/`, `scripts/build-deb.sh`, and `scripts/build-rpm.sh`; avoid hardcoding distro-specific behavior outside those files unless necessary.
+- Keep packaging changes in `packaging/linux/`, `scripts/build-deb.sh`, `scripts/build-rpm.sh`, and `scripts/build-pacman.sh`; avoid hardcoding distro-specific behavior outside those files unless necessary.
 - Keep `scripts/lib/package-common.sh` aligned with both builders when you add or remove packaged files from the shared runtime payload.

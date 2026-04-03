@@ -27,7 +27,7 @@ help:
 	@printf '  %-18s %s\n' "make clean-state" "Remove updater runtime state from XDG directories"
 	@printf '\nVariables:\n\n'
 	@printf '  %-18s %s\n' "DMG=/path/file.dmg" "Override the DMG passed to install.sh (default: $(DEFAULT_DMG))"
-	@printf '  %-18s %s\n' "PACKAGE_VERSION=..." "Override the package version for make deb / make rpm"
+	@printf '  %-18s %s\n' "PACKAGE_VERSION=..." "Override the package version for make deb / make rpm / make pacman"
 	@printf '  %-18s %s\n' "DEB=/path/file.deb" "Override the .deb used by make install"
 	@printf '  %-18s %s\n' "RPM=/path/file.rpm" "Override the .rpm used by make install"
 	@printf '  %-18s %s\n' "PKG=/path/file.pkg.tar.zst" "Override the pacman package used by make install"

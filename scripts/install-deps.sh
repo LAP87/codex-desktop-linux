@@ -64,7 +64,7 @@ install_pacman() {
     info "Detected Arch Linux (pacman)"
     sudo pacman -S --needed --noconfirm \
         nodejs npm python \
-        p7zip curl unzip \
+        p7zip curl unzip zstd \
         base-devel
 }
 
@@ -112,7 +112,7 @@ case "$DISTRO" in
   sudo dnf install nodejs npm python3 7zip curl unzip @development-tools            # Fedora 41+ (dnf5)
   sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
     && sudo dnf groupinstall 'Development Tools'
-  sudo pacman -S nodejs npm python p7zip curl unzip base-devel                      # Arch"
+  sudo pacman -S nodejs npm python p7zip curl unzip zstd base-devel                 # Arch"
         ;;
 esac
 

@@ -15,6 +15,16 @@ const DPKG_DEB_CANDIDATES: &[&str] = &["/usr/bin/dpkg-deb", "/bin/dpkg-deb"];
 const DPKG_QUERY_CANDIDATES: &[&str] = &["/usr/bin/dpkg-query", "/bin/dpkg-query"];
 const RPM_CANDIDATES: &[&str] = &["/usr/bin/rpm", "/bin/rpm"];
 const PACMAN_CANDIDATES: &[&str] = &["/usr/bin/pacman", "/bin/pacman"];
+const VERCMP_CANDIDATES: &[&str] = &["/usr/bin/vercmp", "/bin/vercmp"];
+const PACMAN_PACKAGE_SUFFIXES: &[&str] = &[
+    ".pkg.tar.zst",
+    ".pkg.tar.xz",
+    ".pkg.tar.gz",
+    ".pkg.tar.bz2",
+    ".pkg.tar.lz",
+    ".pkg.tar.lz4",
+    ".pkg.tar.lz5",
+];
 
 /// The native package format in use on the current system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,14 +53,17 @@ impl PackageKind {
     }
 
     pub fn from_path(path: &Path) -> Self {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.ends_with(".pkg.tar.zst") || name.ends_with(".pkg.tar.xz") {
-            Self::Pacman
-        } else {
-            match path.extension().and_then(|e| e.to_str()) {
-                Some("rpm") => Self::Rpm,
-                _ => Self::Deb,
-            }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if is_pacman_package_file_name(file_name) {
+            return Self::Pacman;
+        }
+
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("rpm") => Self::Rpm,
+            _ => Self::Deb,
         }
     }
 }
@@ -84,19 +97,13 @@ fn installed_rpm_version() -> String {
 }
 
 fn installed_pacman_version() -> String {
-    let output = match Command::new(program_path(PACMAN_CANDIDATES, "pacman"))
+    match Command::new(program_path(PACMAN_CANDIDATES, "pacman"))
         .args(["-Q", PACKAGE_NAME])
         .output()
     {
-        Ok(output) if output.status.success() => output,
-        _ => return "unknown".to_string(),
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("unknown")
-        .to_string()
+        Ok(output) if output.status.success() => parse_pacman_installed_version(output.stdout),
+        _ => "unknown".to_string(),
+    }
 }
 
 /// Installs a rebuilt Debian package on the local machine.
@@ -139,6 +146,7 @@ pub fn install_pacman(path: &Path) -> Result<()> {
         "Pacman package not found: {}",
         path.display()
     );
+    ensure_upgrade_path_pacman(path)?;
 
     let mut command = pacman_install_command(path);
     run_install(&mut command).context("pacman -U failed")
@@ -188,6 +196,21 @@ fn parse_installed_version(stdout: Vec<u8>) -> String {
     }
 }
 
+fn parse_pacman_installed_version(stdout: Vec<u8>) -> String {
+    let text = String::from_utf8_lossy(&stdout);
+    let version = text
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if version.is_empty() {
+        "unknown".to_string()
+    } else {
+        version
+    }
+}
+
 fn ensure_upgrade_path(path: &Path) -> Result<()> {
     let installed = installed_package_version();
     if installed == "unknown" {
@@ -197,6 +220,20 @@ fn ensure_upgrade_path(path: &Path) -> Result<()> {
     let candidate = deb_package_version(path)?;
     anyhow::ensure!(
         is_version_newer(&candidate, &installed)?,
+        "Refusing to install non-newer package version {candidate} over installed version {installed}"
+    );
+    Ok(())
+}
+
+fn ensure_upgrade_path_pacman(path: &Path) -> Result<()> {
+    let installed = installed_pacman_version();
+    if installed == "unknown" {
+        return Ok(());
+    }
+
+    let candidate = pacman_package_version(path)?;
+    anyhow::ensure!(
+        is_version_newer_pacman(&candidate, &installed)?,
         "Refusing to install non-newer package version {candidate} over installed version {installed}"
     );
     Ok(())
@@ -292,6 +329,60 @@ fn is_version_newer(candidate: &str, installed: &str) -> Result<bool> {
         .status()
         .context("Failed to compare Debian package versions")?;
     Ok(status.success())
+}
+
+fn pacman_package_version(path: &Path) -> Result<String> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Package path has no file name")?;
+
+    let stripped = strip_pacman_package_suffix(file_name)
+        .with_context(|| format!("Not a valid pacman package filename: {file_name}"))?;
+    let prefix = format!("{PACKAGE_NAME}-");
+    let without_name = stripped
+        .strip_prefix(&prefix)
+        .with_context(|| format!("Pacman package filename does not start with {prefix}"))?;
+    let (version_release, _arch) = without_name
+        .rsplit_once('-')
+        .context("Pacman package filename is missing an architecture suffix")?;
+    anyhow::ensure!(
+        !version_release.is_empty(),
+        "Could not parse package version from {file_name}"
+    );
+    Ok(version_release.to_string())
+}
+
+fn is_version_newer_pacman(candidate: &str, installed: &str) -> Result<bool> {
+    let output = Command::new(program_path(VERCMP_CANDIDATES, "vercmp"))
+        .args([candidate, installed])
+        .output()
+        .context("Failed to compare pacman package versions")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "vercmp exited with status {}",
+        output.status
+    );
+
+    let comparison = String::from_utf8(output.stdout)
+        .context("vercmp returned a non-UTF8 response")?
+        .trim()
+        .parse::<i32>()
+        .context("vercmp returned an invalid comparison value")?;
+    Ok(comparison > 0)
+}
+
+fn strip_pacman_package_suffix(file_name: &str) -> Option<&str> {
+    let lower = file_name.to_ascii_lowercase();
+    PACMAN_PACKAGE_SUFFIXES.iter().find_map(|suffix| {
+        lower
+            .strip_suffix(suffix)
+            .map(|_| &file_name[..file_name.len() - suffix.len()])
+    })
+}
+
+fn is_pacman_package_file_name(file_name: &str) -> bool {
+    strip_pacman_package_suffix(file_name).is_some()
 }
 
 fn program_exists(candidates: &[&str], fallback: &str) -> bool {
@@ -464,6 +555,10 @@ mod tests {
 
     #[test]
     fn compares_debian_versions_using_dpkg_rules() -> Result<()> {
+        if !program_exists(DPKG_CANDIDATES, "dpkg") {
+            return Ok(());
+        }
+
         assert!(is_version_newer(
             "2026.03.24.220000+88f07cd3",
             "2026.03.24.120000+afed8a8e"
@@ -487,5 +582,24 @@ mod tests {
     #[test]
     fn empty_installed_version_output_is_reported_as_unknown() {
         assert_eq!(parse_installed_version(Vec::new()), "unknown");
+    }
+
+    #[test]
+    fn parses_pacman_installed_version_output() {
+        assert_eq!(
+            parse_pacman_installed_version(b"codex-desktop 2026.04.02.120000-1\n".to_vec()),
+            "2026.04.02.120000-1"
+        );
+    }
+
+    #[test]
+    fn parses_pacman_package_version_from_filename() -> Result<()> {
+        assert_eq!(
+            pacman_package_version(Path::new(
+                "/tmp/codex-desktop-2026.04.02.120000-1-x86_64.pkg.tar.zst"
+            ))?,
+            "2026.04.02.120000-1"
+        );
+        Ok(())
     }
 }

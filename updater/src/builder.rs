@@ -17,13 +17,25 @@ use tracing::info;
 const REQUIRED_BUNDLE_FILES: [(&str, &str); 5] = [
     ("install.sh", "install.sh"),
     ("scripts/build-deb.sh", "scripts/build-deb.sh"),
-    ("scripts/lib/package-common.sh", "scripts/lib/package-common.sh"),
+    (
+        "scripts/lib/package-common.sh",
+        "scripts/lib/package-common.sh",
+    ),
     ("packaging/linux", "packaging/linux"),
     ("assets/codex.png", "assets/codex.png"),
 ];
 const OPTIONAL_BUNDLE_FILES: [(&str, &str); 2] = [
     ("scripts/build-rpm.sh", "scripts/build-rpm.sh"),
     ("scripts/build-pacman.sh", "scripts/build-pacman.sh"),
+];
+const PACMAN_PACKAGE_SUFFIXES: &[&str] = &[
+    ".pkg.tar.zst",
+    ".pkg.tar.xz",
+    ".pkg.tar.gz",
+    ".pkg.tar.bz2",
+    ".pkg.tar.lz",
+    ".pkg.tar.lz4",
+    ".pkg.tar.lz5",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,7 +254,7 @@ fn find_package_in(dist_dir: &Path) -> Result<PathBuf> {
     }
 
     anyhow::bail!(
-        "No native package (.deb, .rpm, or .pkg.tar.zst) found in {}",
+        "No native package (.deb, .rpm, or .pkg.tar.*) found in {}",
         dist_dir.display()
     )
 }
@@ -251,14 +263,13 @@ fn is_native_package_file(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("");
-    if name.ends_with(".pkg.tar.zst") || name.ends_with(".pkg.tar.xz") {
-        return true;
-    }
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("deb" | "rpm")
-    )
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".deb")
+        || name.ends_with(".rpm")
+        || PACMAN_PACKAGE_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
 }
 
 fn build_command_path() -> OsString {
@@ -354,22 +365,28 @@ mod tests {
 
     fn write_fake_build_script(path: &Path, output: FakePackageOutput) -> Result<()> {
         let script_body = match output {
-            FakePackageOutput::Deb => r#"#!/bin/bash
+            FakePackageOutput::Deb => {
+                r#"#!/bin/bash
 set -euo pipefail
 mkdir -p "${DIST_DIR_OVERRIDE}"
 touch "${DIST_DIR_OVERRIDE}/codex-desktop_${PACKAGE_VERSION}_amd64.deb"
-"#,
-            FakePackageOutput::Rpm => r#"#!/bin/bash
+"#
+            }
+            FakePackageOutput::Rpm => {
+                r#"#!/bin/bash
 set -euo pipefail
 mkdir -p "${DIST_DIR_OVERRIDE}"
 touch "${DIST_DIR_OVERRIDE}/codex-desktop-${PACKAGE_VERSION}.x86_64.rpm"
-"#,
-            FakePackageOutput::Pacman => r#"#!/bin/bash
+"#
+            }
+            FakePackageOutput::Pacman => {
+                r#"#!/bin/bash
 set -euo pipefail
 VER="${PACKAGE_VERSION%%+*}"
 mkdir -p "${DIST_DIR_OVERRIDE}"
 touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
-"#,
+"#
+            }
         };
 
         fs::write(path, script_body)?;
@@ -425,9 +442,18 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
             )?;
         }
 
-        write_fake_build_script(&bundle_root.join("scripts/build-deb.sh"), FakePackageOutput::Deb)?;
-        write_fake_build_script(&bundle_root.join("scripts/build-rpm.sh"), FakePackageOutput::Rpm)?;
-        write_fake_build_script(&bundle_root.join("scripts/build-pacman.sh"), FakePackageOutput::Pacman)?;
+        write_fake_build_script(
+            &bundle_root.join("scripts/build-deb.sh"),
+            FakePackageOutput::Deb,
+        )?;
+        write_fake_build_script(
+            &bundle_root.join("scripts/build-rpm.sh"),
+            FakePackageOutput::Rpm,
+        )?;
+        write_fake_build_script(
+            &bundle_root.join("scripts/build-pacman.sh"),
+            FakePackageOutput::Pacman,
+        )?;
         fs::write(
             bundle_root.join("scripts/lib/package-common.sh"),
             b"#!/bin/bash\n",
@@ -477,7 +503,7 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
     }
 
     #[test]
-    fn bundle_copy_skips_missing_optional_rpm_script() -> Result<()> {
+    fn bundle_copy_skips_missing_optional_package_scripts() -> Result<()> {
         let temp = tempdir()?;
         let source_root = temp.path().join("source");
         let destination_root = temp.path().join("destination");
@@ -505,6 +531,7 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
 
         assert!(destination_root.join("scripts/build-deb.sh").exists());
         assert!(!destination_root.join("scripts/build-rpm.sh").exists());
+        assert!(!destination_root.join("scripts/build-pacman.sh").exists());
         Ok(())
     }
 
@@ -514,7 +541,9 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
         fs::write(temp.path().join("README.txt"), b"no packages here")?;
 
         let error = find_package_in(temp.path()).expect_err("package discovery should fail");
-        assert!(error.to_string().contains("No native package"));
+        assert!(error
+            .to_string()
+            .contains("No native package (.deb, .rpm, or .pkg.tar.*)"));
         Ok(())
     }
 
